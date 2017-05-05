@@ -37,6 +37,8 @@
 
 #if sPLATFORM==sPLAT_WINDOWS
 
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+
 #include <winsock2.h>
 #pragma comment (lib,"ws2_32.lib")
 
@@ -182,6 +184,7 @@ struct sTCPSocket::Private
 
   sNET_SOCKTYPE Socket;
   sockaddr_in Address;
+  sockaddr_in LocalAddress;
   sBool Connected;
 
   void HandleError()
@@ -251,6 +254,22 @@ sBool sTCPSocket::GetPeerPort(sIPPort &port)
   return sTRUE;
 }
 
+sBool sTCPSocket::GetLocalAddress(sIPAddress &address)
+{
+  sClear(address);
+  if (!IsConnected()) return sFALSE;
+  sCopyMem(&address,&P->LocalAddress.sin_addr,4);
+  return sTRUE;
+}
+
+
+sBool sTCPSocket::GetLocalPort(sIPPort &port)
+{
+  sClear(port);
+  if (!IsConnected()) return sFALSE;
+  port=ntohs(P->LocalAddress.sin_port);
+  return sTRUE;
+}
 
 // check if sockets are able to read
 sBool sTCPSocket::CanRead()
@@ -386,6 +405,9 @@ sBool sTCPClientSocket::Connect(sIPAddress address, sIPPort port)
     return sTRUE;
   }
 
+  int namelen = sizeof(P->LocalAddress);
+  getsockname(s,(sockaddr*)&P->LocalAddress,&namelen);
+
   P->HandleError();
   closesocket(s);
 
@@ -435,6 +457,10 @@ sBool sTCPHostSocket::Listen(sIPPort port)
     {
       P->Socket=s;
       P->Connected=sTRUE;
+
+      int namelen = sizeof(P->LocalAddress);
+      getsockname(s,(sockaddr*)&P->LocalAddress,&namelen);
+
       return sTRUE;
     }
   }
@@ -579,6 +605,10 @@ sTCPSocket* sTCPHostSocket::Accept()
   ts->P->Socket=s;
   ts->P->Address=addr;
   ts->P->Connected=sTRUE;
+
+  int namelen = sizeof(ts->P->LocalAddress);
+  getsockname(s,(sockaddr*)&ts->P->LocalAddress,&namelen);
+
   return ts;
 }
 

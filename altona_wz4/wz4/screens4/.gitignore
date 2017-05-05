@@ -1,0 +1,10 @@
+# directories
+cache
+dist
+sounds
+backup
+revision2013
+revision14
+revision15
+*.dll
+awesomium*

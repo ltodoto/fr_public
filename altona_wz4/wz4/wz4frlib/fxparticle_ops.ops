@@ -223,6 +223,28 @@ operator Wz4Particles Cloud2()
 
 /****************************************************************************/
 
+operator Wz4Particles FromVertex(Wz4Mesh)
+{
+  tab = Wz4Render;
+  column = 3;
+  parameter
+  {
+    flags Selection:2("all|none|selected|unselected")=0;
+    float Random:0(0..1 step 0.01) = 1;
+    int RandomSeed:1(0..255);
+  }
+  code
+  {
+    RPFromVertex *node = new RPFromVertex();
+    node->ParaBase = node->Para = *para;
+    node->Init(in0);
+    out->RootNode = node;
+    out->AddCode(cmd);
+  }
+}
+
+/****************************************************************************/
+
 operator Wz4Particles Wobble(Wz4Particles)
 {
   tab = Wz4Render;
@@ -480,8 +502,9 @@ operator Wz4Render Sprites(Wz4Particles,Texture2D,?Texture2D)
     anim float RotSpread(0..1024 step 0.01) = 0;
     float SizeRand(0..1 step 0.01);
     
-    group "Particle Size";
-    flags GrowMode("const|linear|sine|smoothstep");
+    group "Particle Fade";
+	flags "Fade type" FadeType:26("grow|fade") = 0;
+    flags "Fade mode" GrowMode:13("const|linear|sine|smoothstep");
     anim float FadeIn(0..1 step 0.01) = 0;
     anim float FadeOut(0..1 step 0.01) = 0;
     int Renderpass(-127..127);
@@ -810,6 +833,8 @@ operator Wz4Particles FromMesh(Wz4Mesh)
     float Raster (0..1024 step 0.01) = 0.125;
     float31 Offset (-1024..1024 step 0.001) = 0;
     flags Flags ("-|Hollow");
+    float Random (0..1 step 0.01) = 1;
+    int RandomSeed (0..255);
   }
   code
   {
@@ -818,6 +843,42 @@ operator Wz4Particles FromMesh(Wz4Mesh)
     node->Init(in0);
     out->RootNode = node;
     out->AddCode(cmd);    
+  }
+}
+
+/****************************************************************************/
+
+operator Wz4Particles Morph(Wz4Mesh,Wz4Mesh)
+{
+  tab = Wz4Render;
+  column = 3;
+  parameter
+  {
+    anim float Transition(0..1 step 0.01) = 0;
+    anim float31 DirFactor (-1024..1024 step 0.01) = 0;
+    anim layout flags NewVertexPos ("random|firstindex|manual")=0;
+    if(NewVertexPos&2)
+    {
+      anim float31 BigBangOrigin (-1024..1024 step 0.001) = 0;
+      anim float31 BigBangDirFactor (-1024..1024 step 0.01) = 0;
+    }
+    group "Animation Script"; overbox overlabel linenumber lines 5 string Script;
+  }
+  code
+  {
+    sInt nMesh = cmd->InputCount;
+    sArray<Wz4Mesh*> meshArray;
+    meshArray.AddMany(nMesh);
+    for(sInt i=0; i<nMesh; i++)
+    {
+      meshArray[i] = cmd->GetInput<Wz4Mesh *>(i);
+    }
+
+    RPMorph *node = new RPMorph();
+    node->ParaBase = node->Para = *para;
+    node->Init(meshArray);
+    out->RootNode = node;
+    out->AddCode(cmd);
   }
 }
 

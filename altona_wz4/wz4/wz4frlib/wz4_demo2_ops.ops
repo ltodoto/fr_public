@@ -158,8 +158,25 @@ operator Wz4Render Render "Add" (?*Wz4Render)
 
 /****************************************************************************/
 
+operator Wz4Render RenderNull "Null" (?*Wz4Render) 
+{
+  column = 0;
+  parameter
+  {
+    group "Animation Script"; overbox overlabel linenumber lines 5 string Script:0;
+  }
+  code
+  {
+    out->RootNode = new RNAdd;
+    out->AddChilds(cmd,0);
+  }
+}
+
+/****************************************************************************/
+
 operator Wz4Render Camera(?Rendertarget2D,?*Wz4Render) 
 {
+  shortcut = 'C';
   column = 0;
   parameter
   {
@@ -632,6 +649,7 @@ operator Wz4Render Clip (?*Wz4Render)
     anim flags Enable:7 ("Disable|Enable")=1;
     if(Flags&4)
       float LocalOffset(-0x10000..0x10000 step 0.25) = 0;
+    flags Color ("white|red|yellow|green|cyan|blue|pink|gray")=7;
 
     group "Animation Script"; overbox overlabel linenumber lines 5 string Script;
   }
@@ -709,6 +727,7 @@ operator Wz4Render MultiClip (?*Wz4Render)
       float Time0(0..1 step 0.001) = 0;
       float Time1(0..1 step 0.001) = 1;
       flags Enable("disable|enable") = 1;
+      flags Color ("white|red|yellow|green|cyan|blue|pink|gray")=7;
     }
 
     group "Animation Script"; overbox overlabel linenumber lines 5 string Script;
@@ -822,6 +841,7 @@ operator Wz4Render Variable (?*Wz4Render)
 operator Wz4Render Spline (Wz4Render)
 {
   column = 0;
+  shortcut = 'S';
   customed = Wz4SplineCed;
   parameter 
   {
@@ -1010,6 +1030,7 @@ operator Wz4Render Spline (Wz4Render)
 operator Wz4Render Layer2D(Texture2D,?Texture2D)
 {
   column = 0;
+  shortcut = 'L';
   parameter
   { 
     int Renderpass(-128..128);

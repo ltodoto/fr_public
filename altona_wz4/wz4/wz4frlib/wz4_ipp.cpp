@@ -1631,3 +1631,157 @@ void RNColorMath::Render(Wz4RenderContext *ctx)
 
 
 }
+
+/****************************************************************************/
+
+RNCustomIPP::RNCustomIPP()
+{
+  Anim.Init(Wz4RenderType->Script);
+  Mtrl = new Wz4IppCustom();
+  Mtrl->Flags = sMTRL_ZOFF|sMTRL_CULLOFF;
+}
+
+RNCustomIPP::~RNCustomIPP()
+{
+  delete Mtrl;
+}
+
+void RNCustomIPP::Init()
+{
+  Mtrl->TFlags[0] = sMTF_LEVEL2 | sConvertOldUvFlags(Para.Filter) | sMTF_EXTERN;
+  Mtrl->Prepare(sVertexFormatBasic);
+}
+
+#include "shadercomp\shadercomp.hpp"
+#include "shadercomp\shaderdis.hpp"
+sShader *RNCustomIPP::CompileShader(sInt shadertype, const sChar *source)
+{
+  sString<16> profile;
+  switch (shadertype)
+  {
+    case sSTF_PIXEL|sSTF_HLSL23: profile=L"ps_3_0"; break;
+    case sSTF_VERTEX|sSTF_HLSL23: profile=L"vs_3_0"; break;
+    default: Log.PrintF(L"unknown shader type %x\n",shadertype); return 0;
+  }
+
+  sTextBuffer src2;
+  sTextBuffer error;
+  sU8 *data = 0;
+  sInt size = 0;
+  sShader *sh = 0;
+
+  src2.Print(L"uniform float4x4 mvp : register(c0);\n");
+  src2.Print(L"uniform float4x4 mv : register(c4);\n");
+  src2.Print(L"uniform float3 eye : register(c8);\n");
+
+  switch (shadertype)
+  {
+      // links to customIPP variables
+      // note : these definitions are not implanted (commented here) to give the possibility, in the shader code,
+      // to cast the float4 to another type at declaration or define another variable name, ex :
+      // uniform float4 ps_var0 : register(c9);   =>    uniform float2 myvar : register(c9);
+      // However, dispay these comments lets remember these statements (copy/past) in the debug shader code text field.
+
+    case sSTF_PIXEL|sSTF_HLSL23: profile=L"ps_3_0";
+      src2.Print(L"//uniform float4 ps_var0 : register(c9);     // link to ps_var0 (needs to be redefined)\n");
+      src2.Print(L"//uniform float4 ps_var1 : register(c10);    // link to ps_var1 (needs to be redefined)\n");
+      src2.Print(L"//uniform float4 ps_var2 : register(c11);    // link to ps_var2 (needs to be redefined)\n");
+      src2.Print(L"//uniform float4 ps_var3 : register(c12);    // link to ps_var3 (needs to be redefined)\n");
+      src2.Print(L"//uniform float4 ps_var4 : register(c13);    // link to ps_var4 (needs to be redefined)\n");
+      src2.Print(L"uniform float2 resolution : register(c14);   // screen resolution\n");
+      break;
+
+    case sSTF_VERTEX|sSTF_HLSL23: profile=L"vs_3_0";
+      src2.Print(L"//uniform float4 vs_var0 : register(c9);     // link to vs_var0 (needs to be redefined)\n");
+      src2.Print(L"//uniform float4 vs_var1 : register(c10);    // link to vs_var1 (needs to be redefined)\n");
+      src2.Print(L"//uniform float4 vs_var2 : register(c11);    // link to vs_var2 (needs to be redefined)\n");
+      src2.Print(L"//uniform float4 vs_var3 : register(c12);    // link to vs_var3 (needs to be redefined)\n");
+      src2.Print(L"//uniform float4 vs_var4 : register(c13);    // link to vs_var4 (needs to be redefined)\n");
+      break;
+  }
+
+  src2.Print(L"\n");
+  src2.Print(source);
+
+  if(sShaderCompileDX(src2.Get(),profile,L"main",data,size,sSCF_PREFER_CFLOW|sSCF_DONT_OPTIMIZE,&error))
+  {
+    Log.PrintF(L"dx: %q\n",error.Get());
+    Log.PrintListing(src2.Get());
+    Log.Print(L"/****************************************************************************/\n");
+#if sRENDERER==sRENDER_DX9
+    sPrintShader(Log,(const sU32 *) data,sPSF_NOCOMMENTS);
+#endif
+    sh = sCreateShaderRaw(shadertype,data,size);
+  }
+  else
+  {
+    Log.PrintF(L"dx: %q\n",error.Get());
+    Log.PrintListing(src2.Get());
+    Log.Print(L"/****************************************************************************/\n");
+    sDPrint(Log.Get());
+  }
+  delete[] data;
+
+  return sh;
+}
+
+void RNCustomIPP::Simulate(Wz4RenderContext *ctx)
+{
+  Para = ParaBase;
+  Anim.Bind(ctx->Script,&Para);
+  SimulateCalc(ctx);
+  SimulateChilds(ctx);
+}
+
+void RNCustomIPP::Render(Wz4RenderContext *ctx)
+{
+  RenderChilds(ctx);
+
+  if((ctx->RenderMode & sRF_TARGET_MASK)==sRF_TARGET_MAIN)
+  {
+    sCBuffer<Wz4IppVSCustomPara> cbv;
+    sCBuffer<Wz4IppPSCustomPara> cbp;
+
+    sTexture2D *src = sRTMan->ReadScreen();
+    sTexture2D *dest = sRTMan->WriteScreen();
+    sRTMan->SetTarget(dest);
+
+    ctx->IppHelper->GetTargetInfo(cbv.Data->mvp);
+    cbv.Data->mvp.Trans4();
+    cbv.Data->mv = ctx->View.ModelView;
+    cbv.Data->mv.Trans4();
+    cbv.Data->eye = ctx->View.Camera.l;
+
+    cbp.Data->mvp = ctx->View.ModelScreen;
+    cbp.Data->mvp.Trans4();
+    cbp.Data->mv = ctx->View.ModelView;
+    cbp.Data->mv.Trans4();
+    cbp.Data->eye = ctx->View.Camera.l;
+
+    cbp.Data->resolution.Init(ctx->ScreenX, ctx->ScreenY, 0, 0);
+
+     // bind gui parameters for vertex shader
+    cbv.Data->vs_var0.Init(Para.vs_var0[0], Para.vs_var0[1], Para.vs_var0[2], Para.vs_var0[3]);
+    cbv.Data->vs_var1.Init(Para.vs_var1[0], Para.vs_var1[1], Para.vs_var1[2], Para.vs_var1[3]);
+    cbv.Data->vs_var2.Init(Para.vs_var2[0], Para.vs_var2[1], Para.vs_var2[2], Para.vs_var3[3]);
+    cbv.Data->vs_var3.Init(Para.vs_var3[0], Para.vs_var3[1], Para.vs_var3[2], Para.vs_var3[3]);
+    cbv.Data->vs_var4.Init(Para.vs_var4[0], Para.vs_var4[1], Para.vs_var4[2], Para.vs_var4[3]);
+    cbv.Modify();
+
+    // bind gui parameters for pixel shader
+    cbp.Data->ps_var0.Init(Para.ps_var0[0], Para.ps_var0[1], Para.ps_var0[2], Para.ps_var0[3]);
+    cbp.Data->ps_var1.Init(Para.ps_var1[0], Para.ps_var1[1], Para.ps_var1[2], Para.ps_var1[3]);
+    cbp.Data->ps_var2.Init(Para.ps_var2[0], Para.ps_var2[1], Para.ps_var2[2], Para.ps_var2[3]);
+    cbp.Data->ps_var3.Init(Para.ps_var3[0], Para.ps_var3[1], Para.ps_var3[2], Para.ps_var3[3]);
+    cbp.Data->ps_var4.Init(Para.ps_var4[0], Para.ps_var4[1], Para.ps_var4[2], Para.ps_var4[3]);
+    cbp.Modify();
+
+    Mtrl->Texture[0] = src;
+    Mtrl->Set(&cbv,&cbp);
+    ctx->IppHelper->DrawQuad(dest,src);
+    Mtrl->Texture[0] = 0;
+
+    sRTMan->Release(src);
+    sRTMan->Release(dest);
+  }
+}

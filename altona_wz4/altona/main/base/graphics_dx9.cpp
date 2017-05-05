@@ -330,10 +330,11 @@ void InitGFX(sInt flags_,sInt xs_,sInt ys_)
     d3dpp[0].Windowed = 0;
     d3dpp[0].BackBufferWidth = DXScreenMode.ScreenX;
     d3dpp[0].BackBufferHeight = DXScreenMode.ScreenY;
-    d3dpp[0].BackBufferCount = 2;
     d3dpp[0].SwapEffect = D3DSWAPEFFECT_FLIP;
+    d3dpp[0].BackBufferCount = 2;
     d3dpp[0].BackBufferFormat = colormode;
     d3dpp[0].PresentationInterval = D3DPRESENT_INTERVAL_DEFAULT;
+    d3dpp[0].FullScreen_RefreshRateInHz = DXScreenMode.Frequency;
   }
   else
   {
@@ -367,6 +368,8 @@ void InitGFX(sInt flags_,sInt xs_,sInt ys_)
   }
 
   // create or restart
+
+  
 
   if(DXDev==0)  // create new
   {
@@ -459,6 +462,8 @@ void InitGFX(sInt flags_,sInt xs_,sInt ys_)
     sGeoBufferReset1();
     sFORALL(*AllOccQueryNodes,qn)
       DXErr(DXDev->CreateQuery(D3DQUERYTYPE_OCCLUSION,&qn->Query))
+
+   
   }
 
   // Check support for depth textures (device must be available)  
@@ -958,6 +963,17 @@ sBool sSetScreenMode(const sScreenMode &smorg)
     if(sm.Flags & sSM_NOVSYNC)    flags |= sISF_NOVSYNC;
     if(sm.MultiLevel>=0)          flags |= sISF_FSAA;
 
+    if ((sSystemFlags & sISF_FULLSCREEN) != (flags & sISF_FULLSCREEN))
+    {
+      RECT r2;
+      r2.left = r2.top = 0;
+      r2.right = sm.ScreenX; 
+      r2.bottom = sm.ScreenY;
+      AdjustWindowRect(&r2,GetWindowLong(sHWND,GWL_STYLE),FALSE);
+      SetWindowPos(sHWND,HWND_NOTOPMOST,0,0,r2.right-r2.left,r2.bottom-r2.top,SWP_NOMOVE|SWP_NOZORDER);
+    }
+
+    sSystemFlags = (sSystemFlags&~(sISF_FULLSCREEN|sISF_REFRAST|sISF_NOVSYNC|sISF_FSAA)) | flags;
     DXScreenMode = sm;
 
     DXRestore = 1;
@@ -4855,6 +4871,11 @@ sBool sRender3DBegin()
     if(DXMayRestore)
     {
       InitGFX(0,0,0);
+      if (DXRestore)
+      {
+        sSleep(10);
+        return 0;
+      }
     }
     else
     {

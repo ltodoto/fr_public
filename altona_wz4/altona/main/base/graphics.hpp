@@ -201,7 +201,7 @@ enum sTextureFlags
   sTEX_SCREENSIZE   = 0x00020000, // for rendertargets: use size of screen, update when resizing, use SizeX & SizeY as shift to create half / qarter screens.
   sTEX_SOFTWARE     = 0x00040000, // flagging sTextureSoftware type
   sTEX_SWIZZLED     = 0x00080000, // hardware dependent swizzled texture
-  sTEX_ENDIAN_NN    = 0x00100000, // non native endianess of texture
+  sTEX_PROXY        = 0x00100000, // flagging sTextureProxy type
   sTEX_AUTOMIPMAP   = 0x00200000, // generate mipmaps for rendertarget
   sTEX_STREAM       = 0x00400000, // texture is update every frame
   sTEX_FASTDXTC     = 0x00800000, // texture uses fast dxt compression
@@ -776,6 +776,7 @@ extern sVertexFormatHandle *sVertexFormatBasic;       // pos, color0
 extern sVertexFormatHandle *sVertexFormatStandard;    // pos, normal, uv0
 extern sVertexFormatHandle *sVertexFormatDouble;      // pos, color0, uv0, uv1
 extern sVertexFormatHandle *sVertexFormatSingle;      // pos, color0, uv0
+extern sVertexFormatHandle *sVertexFormatTangent;     // pos, normal, tangent, uv0
 extern sVertexFormatHandle *sVertexFormatTSpace;      // pos, normal, tangent, color0, uv0, uv1
 extern sVertexFormatHandle *sVertexFormatTSpace4;     // pos, normal, tangent with bitangent sign, color0, uv0, uv1
 extern sVertexFormatHandle *sVertexFormatTSpace4_uv3;     // pos, normal, tangent with bitangent sign, color0, uv0, uv1, uv2
@@ -820,6 +821,20 @@ struct sVertexStandard            // 32 bytes
   { px=p.x; py=p.y; pz=p.z; nx=n.x; ny=n.y; nz=n.z; u0=U0; v0=V0; }
 
   static sVertexFormatHandle* VertexFormat() {return sVertexFormatStandard;}
+};
+
+struct sVertexTangent             // 44 bytes
+{
+  sF32 px,py,pz;                  // 3 position
+  sF32 nx,ny,nz;                  // 3 normal
+  sF32 tx,ty,tz;                  // 3 tangent
+  sF32 u0,v0;                     // 2 uv's
+  void Init(sF32 PX,sF32 PY,sF32 PZ,sF32 NX,sF32 NY,sF32 NZ,sF32 TX,sF32 TY,sF32 TZ,sF32 U0,sF32 V0) volatile
+  { px=PX; py=PY; pz=PZ; nx=NX; ny=NY; nz=NZ; u0=U0; v0=V0; tx=ty=tz=0;}
+  void Init(const sVector31 &p,const sVector30 &n,sF32 U0,sF32 V0) volatile
+  { px=p.x; py=p.y; pz=p.z; nx=n.x; ny=n.y; nz=n.z; u0=U0; v0=V0; tx=ty=tz=0; }
+
+  static sVertexFormatHandle* VertexFormat() {return sVertexFormatTangent;}
 };
 
 struct sVertexDouble              // 32 bytes

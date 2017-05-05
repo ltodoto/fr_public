@@ -10,6 +10,7 @@
 #include "wz4frlib/fxparticle_shader.hpp"
 #include "wz4frlib/wz4_bsp.hpp"
 #include "base/graphics.hpp"
+#include "util/algorithms.hpp"
 
 /****************************************************************************/
 /****************************************************************************/
@@ -33,6 +34,21 @@ static void InitSinTable()
       SinTable[i]=sFSin(x);
     }
     SinTableInited=sTRUE;
+  }
+}
+
+static sBool logic(sInt selflag,sF32 select)
+{
+  switch(selflag)
+  {
+  default:
+    return 1;
+  case 1:
+    return 0;
+  case 2:
+    return select>=0.5f;
+  case 3:
+    return select<=0.5f;
   }
 }
 
@@ -366,6 +382,7 @@ Wz4Explosion::~Wz4Explosion()
 
 RPExploder::RPExploder()
 {
+  InitSinTable();
   Mesh = 0;
 }
 
@@ -835,11 +852,11 @@ void RNSprites::Prepare(Wz4RenderContext *ctx)
     fo = 1-fi;
   sF32 fii = 0;
   sF32 foi = 0;
-  if(fi>0.01f)
+  if(fi>0.0001f)
     fii = 1/fi;
   else 
     fi = 0; 
-  if(fo>0.01f)
+  if(fo>0.0001f)
     foi = 1/fo;
   else 
     fo = 0;
@@ -856,16 +873,19 @@ void RNSprites::Prepare(Wz4RenderContext *ctx)
     t = sMod(part->Time,1);
     sF32 tt = 1;
     sF32 s = part->SizeRand;
+    sF32 fade = 1;
     if(t<fi)
     {
       tt = t*fii;
-      s *= (ga+tt*gb+tt*tt*gc+tt*tt*tt*gd);
+      fade = (ga+tt*gb+tt*tt*gc+tt*tt*tt*gd);
     }
     else if(1-t<fo)
     {
       tt = (1-t)*foi;
-      s *= (ga+tt*gb+tt*tt*gc+tt*tt*tt*gd);
+      fade  = (ga+tt*gb+tt*tt*gc+tt*tt*tt*gd);
     }
+    if (Para.FadeType == 0)
+      s*=fade;
     vp1->sx = sx*s;
     vp1->sy = sy*s;
     vp1->u1 = t;
@@ -884,7 +904,10 @@ void RNSprites::Prepare(Wz4RenderContext *ctx)
     vp1->uvrect = UVRects[texanim+part->Group*uvcounti];
 
     vp1->fade = part->DistFade;
-    vp1->Color = part->Color;
+    if (Para.FadeType == 1)
+      vp1->Color = sColorFade(0,part->Color,fade);
+    else
+      vp1->Color = part->Color;
 
     vp1++;
   }
@@ -2812,6 +2835,7 @@ RPSplinedParticles::RPSplinedParticles()
 {
   Anim.Init(Wz4RenderType->Script);
   Source = 0;
+  Spline = AltSpline = 0;
 }
 
 RPSplinedParticles::~RPSplinedParticles()
@@ -3080,6 +3104,8 @@ void RPBulge::Func(Wz4PartInfo &pinfo,sF32 time,sF32 dt)
 RPSparcle::RPSparcle()
 {
   Source = 0;
+  MaxSparks = 0;
+  NeedInit = sTRUE;
 }
 
 RPSparcle::~RPSparcle()
@@ -3090,13 +3116,15 @@ RPSparcle::~RPSparcle()
 void RPSparcle::Init()
 {
   Para = ParaBase;
-  sVector30 speed;
+  MaxSparks = Source->GetPartCount() * Para.SamplePoints * Para.Percentage;
+  NeedInit = sTRUE;
+}
 
+void RPSparcle::DelayedInit()
+{
   sRandom rnd;
   rnd.Seed(Para.RandomSeed);
-
   sInt maxsrc = Source->GetPartCount();
-
 
   Wz4PartInfo part[2];
   sInt db = 0;
@@ -3107,6 +3135,7 @@ void RPSparcle::Init()
   part[db].Reset();
   Source->Func(part[db],-1.0f,0);
 
+  Sparcs.Clear();
   for(sInt i=0;i<Para.SamplePoints;i++)
   {
     db = !db;
@@ -3116,8 +3145,9 @@ void RPSparcle::Init()
 
     for(sInt j=0;j<maxsrc;j++)
     {
-      if(part[db].Parts[j].Time>=0 && rnd.Float(1)<Para.Percentage)
+      if(part[db].Parts[j].Time>=0 && rnd.Float(1)<Para.Percentage && Sparcs.GetCount()<MaxSparks)
       {
+        sVector30 speed;
         Sparc *s = Sparcs.AddMany(1);
 
         s->Time0 = time;
@@ -3130,11 +3160,13 @@ void RPSparcle::Init()
       }
     }
   }
+
+  NeedInit = sFALSE;
 }
 
 sInt RPSparcle::GetPartCount()
 {
-  return Sparcs.GetCount();
+  return MaxSparks;
 }
 
 sInt RPSparcle::GetPartFlags()
@@ -3145,8 +3177,10 @@ sInt RPSparcle::GetPartFlags()
 void RPSparcle::Simulate(Wz4RenderContext *ctx)
 {
   Source->Simulate(ctx);
-
   SimulateCalc(ctx);
+
+  if (NeedInit)
+    DelayedInit();
 }
 
 void RPSparcle::Func(Wz4PartInfo &pinfo,sF32 time,sF32 dt)
@@ -3287,6 +3321,9 @@ void RPFromMesh::Init(Wz4Mesh *mesh)
     }
   }
 
+  sRandom rnd;
+  rnd.Seed(Para.RandomSeed);
+
   for(sInt z=z0;z<z1;z++)
   {
     for(sInt y=y0;y<y1;y++)
@@ -3295,9 +3332,12 @@ void RPFromMesh::Init(Wz4Mesh *mesh)
       {
         if(map[(z-z0)*ym*xm + (y-y0)*xm + (x-x0)]==1)
         {
-          Part *p = Parts.AddMany(1);
-          p->Pos.Init(x*s+xo,y*s+yo,z*s+zo);
-          p->Size = s;
+          if (rnd.Float(1)<=Para.Random)
+          {
+            Part *p = Parts.AddMany(1);
+            p->Pos.Init(x*s+xo,y*s+yo,z*s+zo);
+            p->Size = s;
+          }
         }
       }
     }
@@ -3333,3 +3373,230 @@ void RPFromMesh::Func(Wz4PartInfo &pinfo,sF32 time,sF32 dt)
 }
 
 /****************************************************************************/
+/***                                                                      ***/
+/***   FromVertex (generate node particles from each vertex in the mesh)  ***/
+/***                                                                      ***/
+/****************************************************************************/
+
+RPFromVertex::RPFromVertex()
+{
+}
+
+RPFromVertex::~RPFromVertex()
+{
+}
+
+// For sorting (to identify unique verts)
+static inline bool operator <(const sVector31 &a, const sVector31 &b)
+{
+  if (a.x != b.x) return a.x < b.x;
+  if (a.y != b.y) return a.y < b.y;
+  return a.z < b.z;
+}
+
+void RPFromVertex::Init(Wz4Mesh *mesh)
+{
+  sArray<sVector31> positions;
+  Wz4MeshVertex * vp;
+  Para = ParaBase;
+  sRandom rnd;
+  rnd.Seed(Para.RandomSeed);
+
+  sVERIFY(mesh != 0);
+
+  // build list of all positions (including duplicates)
+  sFORALL(mesh->Vertices, vp)
+  {
+    if(logic(Para.Selection, vp->Select))
+      positions.AddTail(vp->Pos);
+  }
+
+  // sort to identify unique particles
+  sIntroSort(sAll(positions));
+  for(sInt i=0; i < positions.GetCount(); i++)
+  {
+    if((i == 0 || positions[i] != positions[i-1]) && // haven't seen this one before
+      rnd.Float(1) <= Para.Random)
+    {
+      Part *p = Parts.AddMany(1);
+      p->Pos = positions[i];
+    }
+  }
+}
+
+
+void RPFromVertex::Simulate(Wz4RenderContext *ctx)
+{
+  //SimulateCalc(ctx);
+}
+
+sInt RPFromVertex::GetPartCount()
+{
+  return Parts.GetCount();
+}
+
+sInt RPFromVertex::GetPartFlags()
+{
+  return 0;
+}
+
+void RPFromVertex::Func(Wz4PartInfo &pinfo,sF32 time,sF32 dt)
+{
+  sInt count = Parts.GetCount();
+
+  for(sInt i=0;i<count;i++)
+  {
+    pinfo.Parts[i].Init(Parts[i].Pos,1.0f);
+  }
+  pinfo.Used = count;
+}
+
+/****************************************************************************/
+
+RPMorph::RPMorph()
+{
+  Anim.Init(Wz4RenderType->Script);
+  max = 0;
+}
+
+RPMorph::~RPMorph()
+{
+}
+
+void RPMorph::Init(sArray<Wz4Mesh*> meshArray)
+{
+  sArray<sVector31> positions;
+  Wz4MeshVertex * vp;
+  Wz4Mesh* meshTmp;
+  sInt meshIndex = 0;
+
+  sFORALL(meshArray, meshTmp)
+  {
+    sVERIFY(meshTmp != 0);
+
+    sFORALL(meshTmp->Vertices, vp)
+    {
+      Part *p = shapeParts[meshIndex].AddMany(1);
+      p->Pos.Init(vp->Pos.x, vp->Pos.y, vp->Pos.z);
+    }
+
+    max = sMax(meshTmp->Vertices.GetCount(),max);
+
+    meshIndex++;
+  }
+}
+
+sInt RPMorph::GetPartCount()
+{
+  return max;
+}
+
+sInt RPMorph::GetPartFlags()
+{
+  return 0;
+}
+
+void RPMorph::Simulate(Wz4RenderContext *ctx)
+{
+  Para = ParaBase;
+  Anim.Bind(ctx->Script,&Para);
+  SimulateCalc(ctx);
+}
+
+void RPMorph::Func(Wz4PartInfo &pinfo,sF32 time,sF32 dt)
+{
+  sRandomMT mt;
+  mt.Seed(time);
+
+  sInt rIndex = 0;
+  sVector31 v;
+
+  for(sInt i=0; i<max; i++)
+  {
+    sVector31 pos;
+
+    if(Para.Transition < 1.0f)
+    {
+      // transition is not yet achieved
+
+      if(i<shapeParts[0].GetCount() && i<shapeParts[1].GetCount())
+      {
+        v = shapeParts[0][i].Pos;
+
+        v.x += mt.Float(Para.DirFactor.x * Para.Transition);
+        v.y += mt.Float(Para.DirFactor.y * Para.Transition);
+        v.z += mt.Float(Para.DirFactor.z * Para.Transition);
+
+        pos.Fade(Para.Transition, v, shapeParts[1][i].Pos);
+        pinfo.Parts[i].Init(pos,1.0f);
+      }
+      else if(i<shapeParts[0].GetCount())
+      {
+        switch(Para.NewVertexPos)
+        {
+        case 0: // random index
+          rIndex = mt.Int(shapeParts[1].GetCount()-1);
+          v = shapeParts[1][rIndex].Pos;
+          break;
+
+        case 1: // first index
+          v = shapeParts[1][0].Pos;
+          break;
+
+        case 2: // manual position
+          v = Para.BigBangOrigin;
+          v.x += mt.Float(Para.BigBangDirFactor.x * Para.Transition);
+          v.y += mt.Float(Para.BigBangDirFactor.y * Para.Transition);
+          v.z += mt.Float(Para.BigBangDirFactor.z * Para.Transition);
+          break;
+        }
+
+        pos.Fade(Para.Transition, shapeParts[0][i].Pos, v);
+        pinfo.Parts[i].Init(pos,1.0f);
+      }
+      else if(Para.Transition > 0 && i<shapeParts[1].GetCount() && (shapeParts[0].GetCount() < shapeParts[1].GetCount()) )
+      {
+        switch(Para.NewVertexPos)
+        {
+        case 0: // random index
+          rIndex = mt.Int(shapeParts[0].GetCount()-1);
+          v = shapeParts[0][rIndex].Pos;
+          break;
+
+        case 1: // first index
+          v = shapeParts[0][0].Pos;
+          break;
+
+        case 2: // manual position
+          v = Para.BigBangOrigin;
+          v.x += mt.Float(Para.BigBangDirFactor.x * Para.Transition);
+          v.y += mt.Float(Para.BigBangDirFactor.y * Para.Transition);
+          v.z += mt.Float(Para.BigBangDirFactor.z * Para.Transition);
+          break;
+        }
+
+        pos.Fade(Para.Transition, v, shapeParts[1][i].Pos);
+        pinfo.Parts[i].Init(pos,1.0f);
+      }
+      else
+      {
+        pinfo.Parts[i].Init(sVector31(0),-1.0f);
+      }
+    }
+    else
+    {
+      // transition is achieved
+
+      if(i<shapeParts[1].GetCount())
+      {
+        pinfo.Parts[i].Init(shapeParts[1][i].Pos,1.0f);
+      }
+      else
+      {
+        pinfo.Parts[i].Init(sVector31(0),-1.0f);
+      }
+    }
+  }
+
+  pinfo.Used = max;
+}

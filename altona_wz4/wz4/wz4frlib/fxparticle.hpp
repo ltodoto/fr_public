@@ -441,6 +441,10 @@ class RPSparcle : public Wz4ParticleNode
     sVector30 Speed;
   };
   sArray<Sparc> Sparcs;
+  sInt MaxSparks;
+  sBool NeedInit;
+
+  void DelayedInit();
 
 public:
   RPSparcle();
@@ -570,6 +574,31 @@ public:
   void Func(Wz4PartInfo &pinfo,sF32 time,sF32 dt);
 };
 
+
+/****************************************************************************/
+
+class RPFromVertex : public Wz4ParticleNode
+{
+  struct Part
+  {
+    sVector31 Pos;
+  };
+  sArray<Part> Parts;
+public:
+  RPFromVertex();
+  ~RPFromVertex();
+  void Init(Wz4Mesh *mesh);
+
+  Wz4ParticlesParaFromVertex Para,ParaBase;
+  Wz4ParticlesParaFromVertex Anim;
+  Wz4ParticleNode *Source;
+
+  void Simulate(Wz4RenderContext *ctx);
+  sInt GetPartCount();
+  sInt GetPartFlags();
+  void Func(Wz4PartInfo &pinfo,sF32 time,sF32 dt);
+};
+
 /****************************************************************************/
 
 class RPFromMesh : public Wz4ParticleNode
@@ -588,6 +617,31 @@ public:
   Wz4ParticlesParaFromMesh Para,ParaBase;
   Wz4ParticlesAnimFromMesh Anim;
   Wz4ParticleNode *Source;
+
+  void Simulate(Wz4RenderContext *ctx);
+  sInt GetPartCount();
+  sInt GetPartFlags();
+  void Func(Wz4PartInfo &pinfo,sF32 time,sF32 dt);
+};
+
+/****************************************************************************/
+
+class RPMorph : public Wz4ParticleNode
+{
+ struct Part
+  {
+    sVector31 Pos;
+  };
+  sArray<Part> shapeParts[16];
+  sInt max;
+
+public:
+  RPMorph();
+  ~RPMorph();
+  void Init(sArray<Wz4Mesh*> meshArray);
+
+  Wz4ParticlesParaMorph Para,ParaBase;
+  Wz4ParticlesAnimMorph Anim;
 
   void Simulate(Wz4RenderContext *ctx);
   sInt GetPartCount();

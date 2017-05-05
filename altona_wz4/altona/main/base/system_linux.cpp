@@ -14,6 +14,7 @@
 #include "base/system.hpp"
 #include "base/types2.hpp"
 #include "base/windows.hpp"
+#include "base/input2.hpp"
 
 #include <stdio.h>
 #include <wchar.h>
@@ -46,6 +47,7 @@ extern void sCollector(sBool exit=sFALSE);
 #if !sCOMMANDLINE
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#undef Status // goddamnit!
 
 XVisualInfo *sXVisualInfo;
 Visual *sXVisual;
@@ -56,22 +58,15 @@ GC sXGC;
 
 static Display *sXMainDisplay;
 static sPtr sXDisplayTls;
-static sInt sMouseLastX,sMouseLastY;
 #else
 struct Display;
 #endif
 
 extern sInt sSystemFlags;
 extern sInt sExitFlag;
-static sInt sFatalFlag;
 extern sApp *sAppPtr;
 
 sU32 sKeyQual;
-sMouseData sMouseCurrent;
-
-static sInt MessageTimeStamp;
-static sStaticArray<sInputEvent> *InputEventQueue;
-sThreadLock *sInputEventQueueLock;
 
 /****************************************************************************/
 /***                                                                      ***/
@@ -269,8 +264,11 @@ void sDPrint(const sChar *text)
   sLinuxFromWide(buffer,text,size);
   
 #if sCOMMANDLINE
-  ssize_t cnt;
-  if(sDebugFile!=-1) cnt=write(sDebugFile,buffer,strlen(buffer));
+  if(sDebugFile!=-1)
+  {
+    ssize_t cnt = write(sDebugFile,buffer,strlen(buffer));
+    cnt = cnt; // unused
+  }
 #else
   fputs(buffer,stderr);
 #endif
@@ -565,6 +563,9 @@ sFile *sRootFileHandler::Create(const sChar *name,sFileAccess access)
   case sFA_READWRITE:
     fd = open(u8name,O_RDWR|O_CREAT,0644);
     break;
+  default:
+    sVERIFYFALSE;
+    return 0;
   }
   
   if(fd!=-1)
@@ -1234,6 +1235,133 @@ void sThreadEvent::Reset()
 /***                                                                      ***/
 /****************************************************************************/
 
+static sThreadLock *InputThreadLock;
+
+class sKeyboardData
+{
+public:
+  sKeyboardData(sInt num)
+    : Device(sINPUT2_TYPE_KEYBOARD, num)
+  {
+    keys.HintSize(256);
+    keys.AddManyInit(256, sFALSE);
+    sInput2RegisterDevice(&Device);
+  }
+
+  ~sKeyboardData()
+  {
+    sInput2RemoveDevice(&Device);
+  }
+
+  void Poll()
+  {
+    InputThreadLock->Lock();
+    sInput2DeviceImpl<sINPUT2_KEYBOARD_MAX>::Value_ v;
+    for (sInt i=0; i < 255; i++)
+      v.Value[i] = keys[i] ? 1.0f : 0.0f;
+    v.Timestamp = sGetTime();
+    v.Status = 0;
+    Device.addValues(v);
+    InputThreadLock->Unlock();
+  }
+
+  sStaticArray<sBool> keys;
+
+private:
+  sInput2DeviceImpl<sINPUT2_KEYBOARD_MAX> Device;
+};
+
+class sMouseData
+{
+public:
+  enum
+  {
+    sMB_LEFT = 1,                   // left mouse button
+    sMB_RIGHT = 2,                  // right mouse button
+    sMB_MIDDLE = 4,                 // middle mouse button
+    sMB_X1 = 8,                     // 4th mouse button
+    sMB_X2 = 16,                    // 5th mouse button
+  };
+
+  sMouseData(sInt num) 
+   : Device(sINPUT2_TYPE_MOUSE, num) 
+  {
+    X = Y = Z = RawX = RawY = Buttons = 0;
+    sInput2RegisterDevice(&Device);
+  }
+
+  ~sMouseData()
+  {
+    sInput2RemoveDevice(&Device);
+  }
+
+  void Poll() 
+  {
+    InputThreadLock->Lock();
+    sInput2DeviceImpl<sINPUT2_MOUSE_MAX>::Value_ v;
+    v.Value[sINPUT2_MOUSE_X] = X;
+    v.Value[sINPUT2_MOUSE_Y] = Y;
+    v.Value[sINPUT2_MOUSE_RAW_X] = RawX;
+    v.Value[sINPUT2_MOUSE_RAW_Y] = RawY;
+    v.Value[sINPUT2_MOUSE_WHEEL] = Z;
+    v.Value[sINPUT2_MOUSE_LMB] = Buttons & sMB_LEFT;
+    v.Value[sINPUT2_MOUSE_RMB] = Buttons & sMB_RIGHT;
+    v.Value[sINPUT2_MOUSE_MMB] = Buttons & sMB_MIDDLE;
+    v.Value[sINPUT2_MOUSE_X1] = Buttons & sMB_X1;
+    v.Value[sINPUT2_MOUSE_X2] = Buttons & sMB_X2;
+    v.Value[sINPUT2_MOUSE_VALID] = 1.0f;
+    v.Timestamp = sGetTime();
+    v.Status = 0;
+    Device.addValues(v);
+    InputThreadLock->Unlock();
+  }
+
+  sInt X;
+  sInt Y;
+  sInt Z;
+  sInt RawX;
+  sInt RawY;
+  sInt Buttons;
+
+private:
+  sInput2DeviceImpl<sINPUT2_MOUSE_MAX> Device;
+};
+
+static sThread *InputThread;
+static sKeyboardData *Keyboard;
+static sMouseData *Mouse;
+
+static void sPollInput(sThread *thread, void *data)
+{
+  while(thread->CheckTerminate())
+  {
+    Mouse->Poll();
+    Keyboard->Poll();
+    sSleep(5);
+  }
+}
+
+static void sInitInput()
+{
+#if !sCOMMANDLINE
+  Keyboard = new sKeyboardData(0);
+  Mouse = new sMouseData(0);
+  InputThreadLock = new sThreadLock;
+  InputThread = new sThread(sPollInput);
+#endif
+}
+
+static void sExitInput()
+{
+#if !sCOMMANDLINE
+  sDelete(InputThread);
+  sDelete(Keyboard);
+  sDelete(Mouse);
+  sDelete(InputThreadLock);
+#endif
+}
+sADDSUBSYSTEM(Input, 0x30, sInitInput, sExitInput);
+
 Display *sXDisplay()
 {
 #if !sCOMMANDLINE
@@ -1252,79 +1380,6 @@ Display *sXDisplay()
 #else
   return 0;
 #endif
-}
-
-static void sSendInput(const sInputEvent &ie)
-{
-  if(!sFatalFlag)
-  {
-#if !sSTRIPPED
-    sBool skip = sFALSE;
-    sInputHook->Call(ie,skip);
-    if(skip) return;
-#endif
-    sAppPtr->OnInput(ie);
-  }
-}
-
-void sQueueInput(sInt devtype,sInt devnum,sU32 key,sInt timestamp)
-{
-  sInputEvent ie;
-  if(!sAppPtr) return;
-  
-  ie.DeviceType = devtype;
-  ie.DeviceId = devnum;
-  ie.Key = key | sKeyQual;
-  ie.Timestamp = timestamp;
-  ie.MouseX = sMouseCurrent.MouseX;
-  ie.MouseY = sMouseCurrent.MouseY;
-  
-  if(InputEventQueue)
-  {
-    sInputEventQueueLock->Lock();
-    if(!InputEventQueue->IsFull())
-      *InputEventQueue->AddMany(1) = ie;
-    sInputEventQueueLock->Unlock();
-  }
-  else
-    sSendInput(ie);
-}
-
-void sQueueInput(sInt devtype,sInt devnum,sU32 key)
-{
-  sQueueInput(devtype,devnum,key,MessageTimeStamp);
-}
-
-void sFlushInput()
-{
-  sInputEvent *ie;
-  
-  if(InputEventQueue)
-  {
-    sInputEventQueueLock->Lock();
-    sInt oldmax = InputEventQueue->GetCount();
-    
-    sSortUp(*InputEventQueue,&sInputEvent::Timestamp);
-    sFORALL(*InputEventQueue,ie)
-      sSendInput(*ie);
-    
-    sVERIFY(oldmax == InputEventQueue->GetCount());
-    InputEventQueue->Clear();
-    sInputEventQueueLock->Unlock();
-  }
-}
-
-void sClearInputQueues()
-{
-  sKeyQual = 0;
-  if(InputEventQueue)
-  {
-    sInputEventQueueLock->Lock();
-    InputEventQueue->Clear();
-    sInputEventQueueLock->Unlock();
-  }
-  if(sInputQueue)
-    while(sInputQueue->RemoveEvent());
 }
 
 void sTriggerEvent(sInt event)
@@ -1349,47 +1404,16 @@ void sSetMouse(sInt x,sInt y)
 #endif
 }
 
-sBool sGetMouseHard(sInt &b,sInt &x,sInt &y,sInt &z)
+void sSetMouseCenter()
 {
-  b = sMouseCurrent.MouseButtons;
-  x = sMouseCurrent.MouseX;
-  y = sMouseCurrent.MouseY;
-  z = 0;
-  return sTRUE;
-}
-
-void sGetMouse(sMouseData &md,sBool center,sBool cleardelta)
-{
-  static sInt first=1;
-  if(first)
-  {
-    sMouseCurrent.Valid=sTRUE;
-    sMouseCurrent.DeltaX = 0;
-    sMouseCurrent.DeltaY = 0;
-    sMouseCurrent.Distance = 0;
-    sMouseCurrent.Angle = 0;
-    first = 0;
-  }
-
-  md = sMouseCurrent;
-  
 #if !sCOMMANDLINE
-  if(center)
-  {
-    Window root;
-    int xp,yp;
-    unsigned int width,height,border,depth;
-    
-    XGetGeometry(sXDisplay(),sXWnd,&root,&xp,&yp,&width,&height,&border,&depth);
-    sSetMouse(width/2,height/2);
-  }
-#endif
+  Window root;
+  int xp,yp;
+  unsigned int width,height,border,depth;
   
-  if (cleardelta)
-  {
-    sMouseCurrent.DeltaX = 0;
-    sMouseCurrent.DeltaY = 0;
-  }
+  XGetGeometry(sXDisplay(),sXWnd,&root,&xp,&yp,&width,&height,&border,&depth);
+  sSetMouse(width/2,height/2);
+#endif
 }
 
 sU32 sGetKeyQualifier()
@@ -1482,14 +1506,6 @@ void sInit(sInt flags,sInt xs,sInt ys)
   XStoreName(dpy,sXWnd,sLinuxFromWide(caption));
   XMapWindow(dpy,sXWnd);
   
-  sInputEventQueueLock = new sThreadLock;
-
-  if(flags & sISF_CONTINUOUS) // message queuing and sorting in continuous mode
-  {
-    InputEventQueue = new sStaticArray<sInputEvent>;
-    InputEventQueue->HintSize(256);
-  }
-  
   sSystemFlags = flags;
   if(flags & sISF_3D)
     InitGFX(flags,xs,ys);
@@ -1578,6 +1594,14 @@ static sInt sXLookupKeySym(KeySym sym)
 }
 #endif
 
+#if !sCOMMANDLINE
+static void sendMouseMove(sInt x, sInt y)
+{
+  // (x<<16)|y? *Really*? (Sigh.)
+  sInput2SendEvent(sInput2Event(sKEY_MOUSEMOVE, 0, ((x & 0xffff) << 16) | (y & 0xffff)));
+}
+#endif
+
 static void sXMessageLoop()
 {
 #if !sCOMMANDLINE
@@ -1587,7 +1611,7 @@ static void sXMessageLoop()
   {
     sBool done = sFALSE;
     static const sInt buttonKey[10] = { 0,sKEY_LMB,sKEY_MMB,sKEY_RMB,sKEY_WHEELUP,sKEY_WHEELDOWN,0,0,sKEY_X1MB,sKEY_X2MB };
-    static const sInt buttonMask[10] = { 0,sMB_LEFT,sMB_MIDDLE,sMB_RIGHT,0,0,0,0,sMB_X1,sMB_X2 };
+    static const sInt buttonMask[10] = { 0,sMouseData::sMB_LEFT,sMouseData::sMB_MIDDLE,sMouseData::sMB_RIGHT,0,0,0,0,sMouseData::sMB_X1,sMouseData::sMB_X2 };
     
     while(!done)
     {
@@ -1596,7 +1620,6 @@ static void sXMessageLoop()
       if(!XPending(dpy) && !sXUpdateEmpty())
       {
         sFrameHook->Call();
-        sFlushInput();
 
         sBool app_fullpaint = sFALSE;
         
@@ -1618,7 +1641,7 @@ static void sXMessageLoop()
           client.Init(0,0,width,height);
           sXGetUpdateBoundingRect(update);
           sXClipPushUpdate();
-          if(sAppPtr && !sFatalFlag)
+          if(sAppPtr)
             sAppPtr->OnPaint2D(client,update);
           sClipPop();
           sXClearUpdate();
@@ -1637,7 +1660,6 @@ static void sXMessageLoop()
       while(XPending(dpy))
       {
         XNextEvent(dpy,&e);
-        MessageTimeStamp = sGetTime();
         
         switch(e.type)
         {
@@ -1655,13 +1677,7 @@ static void sXMessageLoop()
           break;
 
         case MotionNotify:
-          sMouseCurrent.MouseX = e.xmotion.x;
-          sMouseCurrent.MouseY = e.xmotion.y;
-          sMouseCurrent.DeltaX += sMouseCurrent.MouseX - sMouseLastX;
-          sMouseCurrent.DeltaY += sMouseCurrent.MouseY - sMouseLastY;
-          sMouseLastX = sMouseCurrent.MouseX;
-          sMouseLastY = sMouseCurrent.MouseY;
-          sQueueInput(sIED_MOUSE,0,sKEY_MOUSEMOVE);
+          sendMouseMove(e.xmotion.x, e.xmotion.y);
           break;
         
         case ButtonPress:
@@ -1670,13 +1686,12 @@ static void sXMessageLoop()
             sInt b = e.xbutton.button;
             sU32 orm = (e.type == ButtonRelease) ? 0 : ~0u;
             
-            sMouseCurrent.MouseX = e.xbutton.x;
-            sMouseCurrent.MouseY = e.xbutton.y;
+            sendMouseMove(e.xbutton.x, e.xbutton.y);
             if(b < sCOUNTOF(buttonMask))
             {
               sU32 mask = buttonMask[b];
-              sMouseCurrent.MouseButtons = (sMouseCurrent.MouseButtons & ~mask) | (mask & orm);
-              sQueueInput(sIED_MOUSE,0,buttonKey[b] | (sKEYQ_BREAK & ~orm));
+              Mouse[0].Buttons = (Mouse[0].Buttons & ~mask) | (mask & orm);
+              sInput2SendEvent(sInput2Event(buttonKey[b] | (sKEYQ_BREAK & ~orm)));
             }
           }
           break;
@@ -1712,19 +1727,19 @@ static void sXMessageLoop()
               wch[0] = sKEY_ENTER;
             
             for(sInt i=0;i<wch[i];i++)
-              sQueueInput(sIED_KEYBOARD,0,wch[i] | (sKEYQ_BREAK & ~orm));
+              sInput2SendEvent(sInput2Event(wch[i] | (sKEYQ_BREAK & ~orm)));
             
             if(!wch[0]) // nonprintable
             {
               sInt k = sXLookupKeySym(sym);
               if(k)
-                sQueueInput(sIED_KEYBOARD,0,k | (sKEYQ_BREAK & ~orm));
+                sInput2SendEvent(sInput2Event(k | (sKEYQ_BREAK & ~orm)));
             }
           }
           break;
           
         case ClientMessage:
-          if(e.xclient.format == 32 && !sFatalFlag)
+          if(e.xclient.format == 32)
             sAppPtr->OnEvent(e.xclient.data.l[0]);
           break;
 
@@ -1766,121 +1781,11 @@ static void sXMessageLoop()
       ExitGFX();
   }
   
-  sDelete(InputEventQueue);
-  sDelete(sInputEventQueueLock);
-  
   XCloseDisplay(dpy);
 #endif
 }
 
-/****************************************************************************/
-/***                                                                      ***/
-/***   Abstract Joypad Interface                                          ***/
-/***                                                                      ***/
-/****************************************************************************/
-
-static sDList<sJoypad,&sJoypad::Node> *Joypads;   // should be an array.
-
-#if !sSTRIPPED
-sInt JoypadFakeFourControllers = sFALSE;
-#endif
-
-void sPollJoypads(void *user)
-{
-//  sInputQueueEvent iqe;
-
-  sJoypad *pad;
-  sFORALL_LIST((*Joypads),pad)
-  {
-    pad->Poll();
-/*        // do not add events automatically, that would create wrong duplicates!
-    pad->GetData(iqe.Data.Joypad);
-    iqe.DeviceType = sIED_JOYPAD;
-    iqe.DeviceId   = pad->GetId();
-    sInputQueue->NewEvent(iqe);
-    */
-  }
-}
-
-static void sInitJoypadManager()
-{
-#if !sSTRIPPED
-  JoypadFakeFourControllers = sGetShellSwitch(L"fourctrls");
-#endif
-
-  Joypads = new sDList<sJoypad,&sJoypad::Node>;
-  sFrameHook->Add(sPollJoypads);
-}
-
-static void sExitJoypadManager()
-{
-  sFrameHook->Rem(sPollJoypads);
-  while(!Joypads->IsEmpty())
-    delete Joypads->RemHead();
-  delete Joypads;
-}
-
-void sAddJoypad(sJoypad *pad)
-{
-  pad->Id = Joypads->GetCount();
-  pad->SetMotor(0, 0);
-
-  Joypads->AddTail(pad);
-}
-
-sJoypad *sIdentifyJoypad(sInt kind,sU8 *data,sInt size)
-{
-  sJoypad *pad;
-  sFORALL_LIST((*Joypads),pad)
-  {
-    if(pad->Identify(kind,data,size))
-      return pad;
-  }
-  return 0;
-}
-
-
-sJoypad *sGetJoypad(sInt id)
-{
-  sJoypad *result = (id<0 || id>=Joypads->GetCount()) ? sNULL : Joypads->GetSlow(id);
-
-#if !sSTRIPPED
-  if (JoypadFakeFourControllers && !result)
-    result = sGetJoypad(0);
-#endif
-
-  return result;
-}
-
-/****************************************************************************/
-// obsolete stuff
-
-sBool sGetJoypad(sInt device,sJoypadData &data)
-{
-  sJoypad *pad = sGetJoypad(device);
-  if(pad==0 || !pad->IsConnected())
-    return 0;
-  pad->GetData(data);
-  return 1;
-}
-
-sBool sGetJoypadName(sInt device,const sStringDesc &name)
-{
-  sJoypad *pad = sGetJoypad(device);
-  if(pad==0)
-    return 0;
-  pad->GetName(name);
-  return 1;
-}
-
-sBool sSetJoypadMotor(sInt device,sInt slow,sInt fast)
-{
-  sJoypad *pad = sGetJoypad(device);
-  if(pad==0 || !pad->IsConnected())
-    return 0;
-  pad->SetMotor(slow,fast);
-  return 1;
-}
+#if 0 // this was written for old input interface and needs updating
 
 /****************************************************************************/
 /***                                                                      ***/
@@ -2189,6 +2094,8 @@ sADDSUBSYSTEM(JoypadManager,0xa0,sInitJoypadManager,sExitJoypadManager);
 sADDSUBSYSTEM(LinuxJoypad,0xa1,sInitLinuxJoypad,sExitLinuxJoypad);
 #endif
 
+#endif
+
 /****************************************************************************/
 /***                                                                      ***/
 /***   Platform Dependend Memory Code                                     ***/
@@ -2318,7 +2225,7 @@ int main(int argc, char **argv)
   sNewDeviceHook = new sHooks;
   sActivateHook = new sHooks1<sBool>;
 #if !sSTRIPPED
-  sInputHook = new sHooks2<const sInputEvent &,sBool &>;
+  sInputHook = new sHooks2<const sInput2Event &,sBool &>;
   sDebugOutHook = new sHooks1<const sChar*>;
 #endif
  

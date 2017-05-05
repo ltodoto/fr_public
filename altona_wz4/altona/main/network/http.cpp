@@ -152,6 +152,7 @@ sBool sHTTPClient::Connect(const sChar *url, ConnMethod method)
   Method=method;
   Fill=0;
   Size=-1;
+  ChunkLeft = -1;
   RetCode=CS_NOTCONNECTED;
 
   sString<512> host;
@@ -200,6 +201,14 @@ sBool sHTTPClient::Connect(const sChar *url, ConnMethod method)
   // send header lines
   sSPrintF(temp,L"Host: %s\r\n",host);
   sCopyString(sGetAppendDesc(temp),L"User-Agent: AltonaHTTPClient\r\n");
+  sCopyString(sGetAppendDesc(temp),L"Connection: close\r\n");
+
+  if (ETag != L"")
+  {
+    sCopyString(sGetAppendDesc(temp),L"If-None-Match: ");
+    sCopyString(sGetAppendDesc(temp),ETag);
+    sCopyString(sGetAppendDesc(temp),L"\r\n");
+  }
 
   // ... and finalize
   sCopyString(sGetAppendDesc(temp),L"\r\n");
@@ -251,7 +260,7 @@ sBool sHTTPClient::Connect(const sChar *url, ConnMethod method)
       Fill-=llen;
       const sChar *lp=temp; 
 
-      // parse line
+	  // parse line
       if (!RetCode) // "HTTP/x.y ###" first!
       {
         if (sCmpMem(lp,L"HTTP/1.",7)) goto headererr;
@@ -259,11 +268,28 @@ sBool sHTTPClient::Connect(const sChar *url, ConnMethod method)
         if (!sScanInt(lp,RetCode)) goto headererr;
         // not interested in the rest
       }
-      else if (sScanMatch(lp,L"Content-Length: "))
-      {
-        if (!sScanInt(lp,Size)) goto headererr;
-      }
-      
+	  else
+	  {
+		  for (sChar *lp2 = (sChar*)lp; *lp2 && *lp2 != ':'; lp2++)
+			  *lp2 = sLowerChar(*lp2);
+
+		  if (sScanMatch(lp, L"content-length: "))
+		  {
+			  if (!sScanInt(lp, Size)) goto headererr;
+		  }
+		  else if (sScanMatch(lp, L"etag: "))
+		  {
+			  ETag = lp;
+		  }
+		  else if (sScanMatch(lp, L"transfer-encoding: "))
+		  {
+			  for (sChar *lp2 = (sChar*)lp; *lp2; lp2++)
+				  *lp2 = sLowerChar(*lp2);
+
+			  if (sScanMatch(lp, L"chunked"))			  
+				ChunkLeft = 0;
+		  }
+	  }      
     }
 
     if (!llen) 
@@ -314,6 +340,81 @@ sBool sHTTPClient::Read(void *buffer, sDInt size, sDInt &read)
 {
   read=0;
   sU8 *b8=(sU8*)buffer;
+  sBool ret;
+
+  if (ChunkLeft>=0) while (size>0 && read==0) // chunked transfer
+  {
+    sDInt read2;
+
+    // new chunk?
+    if (ChunkLeft==0)
+    {
+      sInt bpos = 0;
+      sDInt csize = 0;
+      sBool ok = 0;
+     
+	  // kill CRLF at end of last chunk
+	  if (Fill >= 2 && Buffer[0] == '\r' && Buffer[1] == '\n')
+	  {
+		  sCopyMem(Buffer, Buffer + 2, Fill - 2);
+		  Fill -= 2;
+	  }
+
+      // try to find chunk size at buffer start
+      while (sIsHex(Buffer[bpos]) && bpos<Fill) 
+      {
+        csize<<=4;
+        sU8 c = Buffer[bpos++];
+        if(c>='0' && c<='9') csize += c-'0';
+        if(c>='a' && c<='f') csize += c-'a'+10;
+        if(c>='A' && c<='F') csize += c-'A'+10;
+      }
+      while (Buffer[bpos]!='\r' && bpos<Fill)
+        bpos++;
+      if (bpos<(Fill-1) && Buffer[bpos]=='\r' && Buffer[bpos+1]=='\n')
+      {
+        bpos+=2;
+        ok = sTRUE;
+      }
+
+      if (!ok) // try to fill up buffer...
+      {
+        
+        if (!sTCPClientSocket::Read(Buffer+Fill,1024-Fill,read2) || read2==0)
+          return sFALSE;
+        Fill+=read2;
+        continue;
+      }
+
+      ChunkLeft = csize; 
+      sCopyMem(Buffer,Buffer+bpos,Fill-bpos);
+      Fill-=bpos;
+
+      if (!csize)
+      {
+        read = 0;
+        return sTRUE;
+      }
+    }
+
+    if (Fill && size && ChunkLeft)
+    {
+      sInt todo=sMin<sInt>(Fill,sMin<sInt>(size, ChunkLeft));
+      sCopyMem(b8,Buffer,todo);
+      sCopyMem(Buffer,Buffer+todo,Fill-todo);
+      Fill-=todo;
+      size-=todo;
+      if (Size>0) Size-=todo;
+      read+=todo;
+      b8+=todo;
+      ChunkLeft-=todo;
+    }
+
+    ret=sTCPClientSocket::Read(b8,sMin<sDInt>(ChunkLeft,size),read2);
+    read+=read2;
+    ChunkLeft-=read2;
+    return sTRUE;
+  }
 
   // still data in our buffer? serve that first!
   if (Fill && size)
@@ -332,7 +433,7 @@ sBool sHTTPClient::Read(void *buffer, sDInt size, sDInt &read)
   if (!Size || !size) return sTRUE;
 
   sDInt r2=0;
-  sBool ret;
+  
   if (Size>0) 
     ret=sTCPClientSocket::Read(b8,sMin(Size,size),r2);
   else

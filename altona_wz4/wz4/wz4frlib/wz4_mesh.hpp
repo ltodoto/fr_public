@@ -49,7 +49,11 @@ struct Wz4MeshVertex
 #endif
   sS16 Index[4];
   sF32 Weight[4];
-  sF32 Select;
+  union
+  {
+    sF32 Select;
+    sInt SelectTemp; // 2nd temp field - wipes selection!
+  };
   sInt Temp;
 
   void Init();
@@ -69,12 +73,33 @@ struct Wz4MeshVertex
 struct Wz4MeshFace
 {
   sInt Cluster;
-  sInt Count;
-  sF32 Select;
+  sU8 Count;          // must be 3 or 4.
+  sU8 Select;
+  sU8 Selected;       // saved selections: bitfield - 1 bit per slot.
+  sU8 _pad;           // explicit padding. (this byte is unused)
   sInt Vertex[4];     // vertices (CCW)
+  sInt Temp;
 
   void Init(sInt count);
   void Invert();
+};
+
+struct Wz4MeshSel
+{
+  sU32 Id;            // element ID
+  sF32 Selected;      // selection value
+};
+
+enum Wz4MeshSelMode
+{
+  wMSM_LOAD   = 0x00,
+  wMSM_STORE  = 0x01,
+};
+
+enum Wz4MeshSelType
+{
+  wMST_VERTEX   = 0x00,
+  wMST_FACE     = 0x01,
 };
 
 struct Wz4MeshFaceConnect
@@ -113,6 +138,7 @@ class Wz4Mesh : public wObject
 public:
   sArray<Wz4MeshVertex> Vertices;
   sArray<Wz4MeshFace> Faces;
+  sArray<Wz4MeshSel> SelVertices[8];  // stored vertices selection in slots
   sArray<Wz4MeshCluster *> Clusters;
   Wz4Skeleton *Skeleton;
   sArray<Wz4ChunkPhysics> Chunks; // alternative to skeleton: just unconnected chunks (debris-style)#
@@ -200,6 +226,12 @@ public:
   sVector30 GetFaceNormal(sInt face) const;
   void CalcBBox(sAABBox &box) const;
 
+  // selection
+  void SelStoreLoad(sInt mode, sInt type, sInt slot);
+  void SelectGrow(Wz4MeshFaceConnect *adj, sInt amount, sInt power, sF32 range);
+  void SelFacesToVertices(sBool outputType, sBool addToInput, sF32 vertexValue, sBool clearFaces);
+  void SelVerticesToFaces(sBool outputType, sBool addToInput, sF32 vertexValue);
+
   /*** ops ***/
 
   // transforms
@@ -211,6 +243,9 @@ public:
   sBool Deform(sInt count,const sVector31 &p0,const sVector31 &p1,sInt keycount,const struct Wz4MeshArrayDeform *keys,sInt selection,sInt upflags,const sVector30 &up);
   void ExtrudeNormal(sInt logic,sF32 amount);
   void Heal(Wz4Mesh *reference, sInt flags, sF32 posThres, sF32 normThres);
+  void TransformRange(sInt rangeMode,sInt mode,sInt selection,sVector2 direction, sVector2 axialRange,
+                      sVector31 scaleStart, sVector30 rotateStart, sVector31 translateStart,
+                      sVector31 scaleEnd, sVector30 rotateEnd, sVector31 translateEnd);
 
   // topology
 
@@ -218,7 +253,7 @@ public:
   void Crease();                  // create a crease between selected and unselected faces
   void Uncrease(sInt select);     // remove all creases at the selected vertices
   void Subdivide(sF32 smooth); // subdivide all selected faces
-  void Extrude(sInt steps,sF32 amount,sInt flags,const sVector31 &center,sF32 localScale);
+  void Extrude(sInt steps,sF32 amount,sInt flags,const sVector31 &center,sF32 localScale,sInt SelectUpdateFlag,const sVector2 &uvOffset);
   void Splitter(Wz4Mesh *in,sF32 depth,sF32 scale);
   void Dual(Wz4Mesh *in,sF32 random);
   sBool DivideInChunks(sInt flags,const sVector30 &normal,const sVector30 &rot);

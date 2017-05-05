@@ -46,7 +46,7 @@ static sBool logic(sInt logic,sF32 select)
   case 1:
     return 0;
   case 2:
-    return select>0.5f;
+    return select>=0.5f;
   case 3:
     return select<0.5f;
   }
@@ -317,6 +317,7 @@ void Wz4MeshFace::Init(sInt count)
   Vertex[1] = 0;
   Vertex[2] = 0;
   Vertex[3] = 0;
+  Selected = 0;
 }
 
 void Wz4MeshFace::Invert()
@@ -447,11 +448,20 @@ template <class streamer> void Wz4Mesh::Serialize_(streamer &s)
     s.Check();
   }
 
+  // clear vertices selection in slots
+  if (s.IsReading())
+  {
+    for(sInt slot=0; slot<8; slot++)
+      SelVertices[slot].Clear();
+  }
+
   s.Array(Faces);
   for (sInt i=0; i<Faces.GetCount(); i++)
   {
     Wz4MeshFace &f=Faces[i];
-    s | f.Count;
+    sU32 count = f.Count;
+    s | count;
+    f.Count = count;
     if (s.IsReading()) f.Init(f.Count);
     for (sInt i=0; i<f.Count; i++) s | f.Vertex[i];
     s | f.Cluster;
@@ -530,6 +540,10 @@ void Wz4Mesh::CopyFrom(Wz4Mesh *src)
 
   Vertices = src->Vertices;
   Faces = src->Faces;
+
+  // copy vertices selection in slots
+  for(sInt i=0; i<8; i++)
+    SelVertices[i] = src->SelVertices[i];
 
   CopyClustersFrom(src);
 
@@ -1228,17 +1242,11 @@ sInt *Wz4Mesh::BasePos(sInt toitself)
     }
     vp->Temp = HashMap[hash];
     HashMap[hash] = _i;
-    map[_i] = -1;
+    map[_i] = toitself ? _i : -1;
 done:;
   }
 
   delete[] HashMap;
-
-  if(toitself)
-    for(sInt i=0;i<Vertices.GetCount();i++)
-      if(map[i]==-1)
-        map[i] = i;
-
   return map;
 }
 
@@ -2046,6 +2054,8 @@ void Wz4Mesh::ExtrudeNormal(sInt logic_,sF32 amount)
 
   delete[] accu;
   delete[] map;
+
+  CalcNormalAndTangents();
 }
 
 
@@ -2577,6 +2587,7 @@ found1b:
         nf->Cluster = f->Cluster;
         nf->Count = 4;
         nf->Select = f->Select;
+        nf->Selected = f->Selected;
         nf->Vertex[0] = centervert[i];
         nf->Vertex[2] = f->Vertex[(j+1)%count];
 
@@ -2629,6 +2640,7 @@ found1b:
           nf->Count = 3;
           nf->Cluster = f->Cluster;
           nf->Select = f->Select;
+          nf->Selected = f->Selected;
           nf->Vertex[0] = sv[(sg    )%sc];
           nf->Vertex[1] = sv[(sg+j+1)%sc];
           nf->Vertex[2] = sv[(sg+j+2)%sc];
@@ -2662,6 +2674,249 @@ ende:
 
 /****************************************************************************/
 
+void Wz4Mesh::SelStoreLoad(sInt mode, sInt type, sInt slot)
+{
+  Wz4MeshFace *f;
+  Wz4MeshVertex *v;
+  Wz4MeshSel s;
+
+  switch(mode)
+  {
+  case wMSM_LOAD:
+    switch(type)
+    {
+    case wMST_VERTEX:
+      // clear vertices selection
+      sFORALL(Vertices,v)
+        v->Select = 0.0f;
+
+      // read all vertices stored and set selection
+      for(int i=0; i<SelVertices[slot].GetCount(); i++)
+        Vertices[SelVertices[slot][i].Id].Select = SelVertices[slot][i].Selected;
+
+      // clear faces selection
+      sFORALL(Faces,f)
+        f->Select = 0;
+      break;
+
+    case wMST_FACE:
+      sFORALL(Faces,f)
+      {
+        if((f->Selected & (1 << slot)) > 0)
+          f->Select = 1;
+        else
+          f->Select = 0;
+      }
+
+      // clear vertices selection
+      sFORALL(Vertices,v)
+        v->Select = 0.0f;
+      break;
+    }
+    break;
+
+  case wMSM_STORE:
+    switch(type)
+    {
+    case wMST_VERTEX:
+      // clear previous selection in this slot
+      SelVertices[slot].Clear();
+
+      // if vertex is selected add it's value and id to array
+      sFORALL(Vertices,v)
+      {
+        if(v->Select > 0.0f)
+        {
+          s.Id = _i;
+          s.Selected = v->Select;
+          SelVertices[slot].AddTail(s);
+        }
+      }
+
+      // clear faces selection
+      sFORALL(Faces,f)
+        f->Select = 0;
+      break;
+
+    case wMST_FACE:
+      sFORALL(Faces,f)
+      {
+        if(f->Select > 0)
+          f->Selected |= (1 << slot);
+        else
+          f->Selected &= ~(1 << slot);
+      }
+
+      // clear vertices selection
+      sFORALL(Vertices,v)
+        v->Select = 0.0f;
+      break;
+    }
+    break;
+  }
+}
+
+/****************************************************************************/
+
+void Wz4Mesh::SelVerticesToFaces(sBool outputType, sBool addToInput, sF32 vertexValue)
+{
+  // outputType = 0 => touched Faces
+  // outputType = 1 => enclosed Faces
+  // addToInput = 0 => previous face selection is cleared
+  // addToInput = 1 => add new selected faces to previous face selection
+  // vertexValue => new selected vertex value
+
+  Wz4MeshVertex *v;
+  Wz4MeshFace *f;
+
+  sInt pc = Vertices.GetCount();
+  sF32 *fsel = new sF32[pc];
+
+  sFORALL(Vertices,v)
+  {
+    fsel[_i] = v->Select;
+
+    // replace select value
+    if(v->Select >= 0.5f)
+      v->Select = vertexValue;
+  }
+
+  sFORALL(Faces,f)
+  {
+    sInt n=0;
+    sBool action=0;
+
+    for(sInt i=0; i<f->Count; i++)
+      n += (fsel[f->Vertex[i]]>=0.5f)?1:0;
+
+    // select touched or enclosed faces
+    if(outputType)
+    {
+      // enclosed faces
+      action = (n==f->Count);
+    }
+    else
+    {
+       // touched faces
+      action = (n>0);
+    }
+
+    // selection output
+    if(addToInput)
+    {
+      // add new selected faces to previous face selection
+      if(action)
+        f->Select = 1;
+    }
+    else
+    {
+      // don't keep previous face selection
+      f->Select = action?1:0;
+    }
+  }
+
+  delete[] fsel;
+}
+
+/****************************************************************************/
+
+void Wz4Mesh::SelFacesToVertices(sBool outputType, sInt addToInput, sF32 value, sBool clearFaces)
+{
+  // outputType = 0 => inner vertex
+  // outputType = 1 => full vertex
+  // addToInput = 0 => previous vertex selection is cleared
+  // addToInput = 1 => add new selected vertex to previous vertice selection
+  // vertexValue => new selected vertex value
+  // clearFaces = 0 => clear previous face selection
+  // clearFaces = 1 => keep previous face selection
+
+  Wz4MeshVertex *v;
+  Wz4MeshFace *f;
+
+  sInt pc = Vertices.GetCount();
+  sF32 *fsel = new sF32[pc];
+
+  for(sInt i=0; i<pc; i++)
+    fsel[i] = 0.0f;
+
+  sFORALL(Faces,f)
+  {
+    if(f->Select==1)
+    {
+      for(sInt i=0; i<f->Count; i++)
+        fsel[f->Vertex[i]] = value;
+    }
+
+    if(clearFaces)
+      f->Select = 0;
+  }
+
+  // select full vertex
+  if(outputType)
+  {
+    sInt *base = BasePos(1);
+
+    for (sInt i=0;i<pc;i++)
+      fsel[base[i]] = sMax(fsel[base[i]],fsel[i]);
+
+    for (sInt i=0;i<pc;i++)
+      fsel[i] = fsel[base[i]];
+
+    delete[] base;
+  }
+
+  sFORALL(Vertices,v)
+  {
+    if(addToInput)
+      v->Select = sMin(v->Select+fsel[_i],1.0f);
+    else
+      v->Select = fsel[_i];
+  }
+
+  delete[] fsel;
+}
+
+/****************************************************************************/
+
+void Wz4Mesh::SelectGrow(Wz4MeshFaceConnect *adj, sInt amount, sInt power, sF32 range)
+{
+  Wz4MeshFace *f;
+  sF32 selectValue = sClamp( powf(amount*range, power) ,0.0f, 1.0f);
+
+  sFORALL(Faces,f)
+    f->Temp = 0;
+
+  // calculation is based on faces selection
+  sFORALL(Faces,f)
+  {
+    if(f->Select==1 && f->Temp==0)
+    {
+      for(sInt j=0; j<f->Count; j++)
+      {
+        sInt m = adj[_i].Adjacent[j];
+        if(m>=0)
+        {
+          Wz4MeshFace *f0 = &Faces[m/4];
+          if(f0->Select==0)
+          {
+            f0->Temp = 1;
+
+            // select faces and vertices
+            f0->Select = 1;
+            for(sInt k=0; k<f0->Count; k++)
+            {
+              if(Vertices.IsIndexValid(f0->Vertex[k]))
+                Vertices[f0->Vertex[k]].Select = selectValue;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/****************************************************************************/
+
 struct IslandEdge 
 { 
   sInt p[2]; 
@@ -2679,7 +2934,21 @@ struct Island
   sVector30 Normal;
 };
 
-void Wz4Mesh::Extrude(sInt steps,sF32 amount,sInt flags,const sVector31 &center,sF32 localScale)
+// Fade such that fade(a, b, 0) == a and fade(a, b, 1) == b for all finite floats.
+sF32 ExactFade(sF32 a,sF32 b,sF32 t)
+{
+  return a*(1.0f-t) + b*t;
+}
+
+static void ExactFade(sVector31 &out,const sVector31 &a,const sVector31 &b,sF32 t)
+{
+  sF32 u = 1.0f - t;
+  out.x = u*a.x + t*b.x;
+  out.y = u*a.y + t*b.y;
+  out.z = u*a.z + t*b.z;
+}
+
+void Wz4Mesh::Extrude(sInt steps,sF32 amount,sInt flags,const sVector31 &center,sF32 localScale,sInt SelectUpdateFlag,const sVector2 &uvOffset)
 {
   sVERIFY(steps>0);
 
@@ -2698,6 +2967,10 @@ void Wz4Mesh::Extrude(sInt steps,sF32 amount,sInt flags,const sVector31 &center,
   for(sInt i=0;i<Vertices.GetCount();i++)
     if(map[i]==-1)
       map[i] = i;
+
+  // store original faces (to keep trace of selected faces)
+  sArray<Wz4MeshFace> originalFaces;
+  originalFaces.Add(Faces);
 
   // find connected islands of selected faces
   sInt nFaces = Faces.GetCount();
@@ -2923,7 +3196,7 @@ void Wz4Mesh::Extrude(sInt steps,sF32 amount,sInt flags,const sVector31 &center,
     }
 
     // transform away island
-    switch(flags & 6)
+    switch((flags >> 1) & 3)
     {
     case 0:
       for(sInt vi=isl->FirstCenter; vi != -1; vi=nextCenter[vi])
@@ -2931,17 +3204,21 @@ void Wz4Mesh::Extrude(sInt steps,sF32 amount,sInt flags,const sVector31 &center,
         v = &Vertices[vi];
         v->Pos = isl->Center + (v->Pos - isl->Center) * localScale;
         v->Pos += isl->Normal*amount;
+        v->U0 += uvOffset.x;
+        v->V0 += uvOffset.y;
       }
       break;
-    case 2:
+    case 1:
       for(sInt vi=isl->FirstCenter; vi != -1; vi=nextCenter[vi])
       {
         v = &Vertices[vi];
         v->Pos = isl->Center + (v->Pos - isl->Center) * localScale;
         v->Pos += v->Normal*amount;
+        v->U0 += uvOffset.x;
+        v->V0 += uvOffset.y;
       }
       break;
-    case 4:
+    case 2:
       for(sInt vi=isl->FirstCenter; vi != -1; vi=nextCenter[vi])
       {
         v = &Vertices[vi];
@@ -2949,6 +3226,8 @@ void Wz4Mesh::Extrude(sInt steps,sF32 amount,sInt flags,const sVector31 &center,
         n.Unit();
         v->Pos = isl->Center + (v->Pos - isl->Center) * localScale;
         v->Pos += n*amount;
+        v->U0 += uvOffset.x;
+        v->V0 += uvOffset.y;
       }
       break;
     }
@@ -2990,13 +3269,14 @@ void Wz4Mesh::Extrude(sInt steps,sF32 amount,sInt flags,const sVector31 &center,
           const Wz4MeshVertex &vb = Vertices[e->px[k]];
 
           v[j*2+k].Init();
-          if(j==steps) v[j*2+k].Pos = vb.Pos;
-          else         v[j*2+k].Pos.Fade(fade,va.Pos,vb.Pos); // fade is not precisze of fade=1 because in float: a+(b-a) != b . this will cause gaps!
-          v[j*2+k].Normal.x = isli;
+          ExactFade(v[j*2+k].Pos,va.Pos,vb.Pos,fade);
+          v[j*2+k].Normal.x = isli; // normal set up to prevent verts from being merged erroneously
           v[j*2+k].Normal.y = ei;
           v[j*2+k].Normal.z = j*2+k;
-          v[j*2+k].U0 = fade;
-          v[j*2+k].V0 = ei/sF32(isl->NumEdges);
+          v[j*2+k].U0 = ExactFade(va.U0,vb.U0,fade);
+          v[j*2+k].V0 = ExactFade(va.V0,vb.V0,fade);
+          v[j*2+k].U1 = ExactFade(va.U1,vb.U1,fade);
+          v[j*2+k].V1 = ExactFade(va.V1,vb.V1,fade);
 
           for(sInt i=0;i<sCOUNTOF(va.Index);i++)
           {
@@ -3036,10 +3316,24 @@ void Wz4Mesh::Extrude(sInt steps,sF32 amount,sInt flags,const sVector31 &center,
 
   // update selection
 
+  // clear selected vertices
   sFORALL(Vertices,v)
     v->Select = 0.0f;
-  sFORALL(Faces,f)
-    f->Select = (_i>=originalfacecount)?1.0f:0.0f;
+
+  // which faces to select ?
+  switch (SelectUpdateFlag)
+  {
+  case 0: // newest faces
+    sFORALL(Faces,f)
+      f->Select = (_i>=originalfacecount)?1.0f:0.0f;
+    break;
+
+  case 1: // original selected faces
+    sFORALL(originalFaces,f)
+      Faces[_i].Select = (f->Select > 0.0f)?1.0f:0.0f;
+    break;
+  }
+
 
   // done and free all
 
@@ -3358,13 +3652,13 @@ void Wz4Mesh::Dual(Wz4Mesh *in,sF32 random)
 
 sBool Wz4Mesh::DivideInChunksR(Wz4MeshFace *mf,sInt mfi,Wz4MeshFaceConnect *conn)
 {
-  sVERIFY(mf->Select>=0.0f);
+  sVERIFY(mf->Temp>=0);
   for(sInt i=0;i<mf->Count;i++)
   {
-    if(Vertices[mf->Vertex[i]].Select<0.0f)
-      Vertices[mf->Vertex[i]].Select = mf->Select;
+    if(Vertices[mf->Vertex[i]].SelectTemp<0)
+      Vertices[mf->Vertex[i]].SelectTemp = mf->Temp;
     else
-      if(Vertices[mf->Vertex[i]].Select != mf->Select)
+      if(Vertices[mf->Vertex[i]].SelectTemp != mf->Temp)
         return 0;
   }
   for(sInt i=0;i<mf->Count;i++)
@@ -3373,15 +3667,15 @@ sBool Wz4Mesh::DivideInChunksR(Wz4MeshFace *mf,sInt mfi,Wz4MeshFaceConnect *conn
     {
       sInt fi = conn[mfi].Adjacent[i]/4;
       Wz4MeshFace *f = &Faces[fi];
-      if(f->Select<0.0f)
+      if(f->Temp<0)
       {
-        f->Select = mf->Select;
+        f->Temp = mf->Temp;
         if(!DivideInChunksR(f,fi,conn))
           return 0;
       }
-      if(f->Select != mf->Select)
+
+      if(f->Temp != mf->Temp)
         return 0;
-      
     }
   }
   return 1;
@@ -3396,17 +3690,17 @@ sBool Wz4Mesh::DivideInChunks(sInt flags,const sVector30 &normal,const sVector30
 
   MergeVertices();
 
-  // find connectd clusters
+  // find connected clusters
 
   Wz4MeshFaceConnect *conn = Adjacency();
 
   sFORALL(Faces,mf)
   {
-    mf->Select = -1.0f;
+    mf->Temp = -1;
     sVERIFY(mf->Cluster>=0 && mf->Cluster<Clusters.GetCount());
   }
   sFORALL(Vertices,mv)
-    mv->Select = -1.0f;
+    mv->SelectTemp = -1;
 
   sInt chunks = 0;
   sFORALL(Clusters,cl)
@@ -3414,9 +3708,9 @@ sBool Wz4Mesh::DivideInChunks(sInt flags,const sVector30 &normal,const sVector30
     sInt cli = _i;
     sFORALL(Faces,mf)
     {
-      if(mf->Cluster==cli && mf->Select<0.0f)
+      if(mf->Cluster==cli && mf->Temp<0)
       {
-        mf->Select = (sF32)(chunks++);
+        mf->Temp = chunks++;
         if(!DivideInChunksR(mf,_i,conn))
         {
           delete[] conn;
@@ -3428,21 +3722,18 @@ sBool Wz4Mesh::DivideInChunks(sInt flags,const sVector30 &normal,const sVector30
 
   delete[] conn;
 
-  sFORALL(Faces,mf)
-    for(sInt i=0;i<mf->Count;i++)
-      sVERIFY(Vertices[mf->Vertex[i]].Select>=0.0f);
   sFORALL(Vertices,mv)
-    sVERIFY(mv->Select>=0.0f);
+    sVERIFY(mv->SelectTemp>=0);
 
   // sort faces by cluster
 
-  sIntroSort(sAll(Faces),sMemberLess(&Wz4MeshFace::Select));
+  sIntroSort(sAll(Faces),sMemberLess(&Wz4MeshFace::Temp));
 
   // reorganize vertices
 
   sFORALL(Vertices,mv)
     mv->Temp = _i;
-  sIntroSort(sAll(Vertices),sMemberLess(&Wz4MeshVertex::Select));
+  sIntroSort(sAll(Vertices),sMemberLess(&Wz4MeshVertex::SelectTemp));
   sInt *remap = new sInt[Vertices.GetCount()];
   sFORALL(Vertices,mv)
     remap[mv->Temp] = _i;
@@ -3455,7 +3746,7 @@ sBool Wz4Mesh::DivideInChunks(sInt flags,const sVector30 &normal,const sVector30
   // debug
 
 //  sFORALL(Vertices,mv)
-//    mv->Pos.y += mv->Select*0.1f;
+//    mv->Pos.y += mv->SelectTemp*0.1f;
 
   // make chunks
 
@@ -3489,10 +3780,10 @@ sBool Wz4Mesh::DivideInChunks(sInt flags,const sVector30 &normal,const sVector30
 
   sFORALL(Vertices,mv)
   {
-    if(mv->Select>=0 && mv->Select<chunks)
+    if(mv->SelectTemp>=0 && mv->SelectTemp<chunks)
     {
-      Chunks[(sInt)mv->Select].COM += sVector30(mv->Pos);
-      Chunks[(sInt)mv->Select].Temp ++;
+      Chunks[mv->SelectTemp].COM += sVector30(mv->Pos);
+      Chunks[mv->SelectTemp].Temp ++;
     }
   }
 
@@ -3500,10 +3791,10 @@ sBool Wz4Mesh::DivideInChunks(sInt flags,const sVector30 &normal,const sVector30
 
   sFORALL(Faces,mf)
   {
-    if(Chunks[(sInt)mf->Select].FirstIndex==-1)
+    if(Chunks[mf->Temp].FirstIndex==-1)
     {
-      Chunks[(sInt)mf->Select].FirstIndex=-2;
-      Chunks[(sInt)mf->Select].FirstFace=_i;
+      Chunks[mf->Temp].FirstIndex=-2;
+      Chunks[mf->Temp].FirstFace=_i;
     }
   }
 
@@ -3511,12 +3802,12 @@ sBool Wz4Mesh::DivideInChunks(sInt flags,const sVector30 &normal,const sVector30
 
   sFORALL(Vertices,mv)
   {
-    if(Chunks[(sInt)mv->Select].FirstIndex<0)
+    if(Chunks[mv->SelectTemp].FirstIndex<0)
     {
-      Chunks[(sInt)mv->Select].FirstIndex=0;
-      Chunks[(sInt)mv->Select].FirstVert=_i;
+      Chunks[mv->SelectTemp].FirstIndex=0;
+      Chunks[mv->SelectTemp].FirstVert=_i;
     }
-    mv->Index[0] = (sInt)mv->Select;
+    mv->Index[0] = mv->SelectTemp;
     mv->Index[1] = -1;
     mv->Index[2] = -1;
     mv->Index[3] = -1;
@@ -3536,9 +3827,10 @@ sBool Wz4Mesh::DivideInChunks(sInt flags,const sVector30 &normal,const sVector30
       ch->FirstIndex = 0;
     }
   }
-  
-  sFORALL(Faces,mf)
-    mf->Select = 0.0f;
+
+  // writing SelectTemp destroyed vertex selection, so just clear
+  // it to make sure it's initialized.
+
   sFORALL(Vertices,mv)
     mv->Select = 0.0f;
   SplitClustersChunked(74);
@@ -3934,6 +4226,98 @@ void Wz4Mesh::Mirror(sBool mx, sBool my, sBool mz, sInt selection, sInt mode)
 
   if (mode&1) CalcNormals();
   if (mode&4) CalcTangents();
+  Flush();
+}
+
+/****************************************************************************/
+
+
+void Wz4Mesh::TransformRange(sInt rangeMode, sInt mode, sInt selection, sVector2 direction, sVector2 axialRange, sVector31 scaleStart, sVector30 rotateStart, sVector31 translateStart,sVector31 scaleEnd, sVector30 rotateEnd, sVector31 translateEnd)
+{
+  Wz4MeshVertex *mv;
+  sMatrix34 mat0,matStart,matEnd,matt,matInvT;
+  sSRT srt;
+
+  // start matrix
+  srt.Scale = scaleStart;
+  srt.Rotate = rotateStart;
+  srt.Translate = translateStart;
+  srt.MakeMatrix(matStart);
+
+  // end matrix
+  srt.Scale = scaleEnd;
+  srt.Rotate = rotateEnd;
+  srt.Translate = translateEnd;
+  srt.MakeMatrix(matEnd);
+
+  // transformation matrix
+  matt.Init();
+  srt.Rotate = sVector30(direction.x, 0, direction.y);
+  srt.MakeMatrix(matt);
+
+  // clean matrix
+  mat0.Init();
+
+  // find min/max range
+  sF32 ymin,ymax;
+  if(rangeMode == 0)
+  {
+    // all mesh range
+    ymin =  1e+30f;
+    ymax = -1e+30f;
+
+    sFORALL(Vertices,mv)
+    {
+      if(logic(selection,mv->Select))
+      {
+        sF32 t = mv->Pos.x*matt.i.y + mv->Pos.y*matt.j.y + mv->Pos.z*matt.k.y;
+        ymin = sMin(ymin,t);
+        ymax = sMax(ymax,t);
+      }
+    }
+  }
+  else
+  {
+    // range defined by axialRange
+    ymin = axialRange.y;
+    ymax = axialRange.x;
+  }
+
+  sF32 yscale = 1.0f / (ymax - ymin);
+
+  sFORALL(Vertices,mv)
+  {
+    if(logic(selection,mv->Select))
+    {
+      sF32 t = (mv->Pos.x*matt.i.y + mv->Pos.y*matt.j.y + mv->Pos.z*matt.k.y - ymin) * yscale;
+
+      switch(mode)
+      {
+      case 1: // smooth
+        t = t * t * (3.0f - 2.0f * t);
+        break;
+
+      case 2: // tent
+        t = 1.0f - fabs(t - 0.5f) * 2.0f;
+        break;
+
+      case 3: // tent smooth
+        t = t * t * (16.0f + t * (16.0f * t - 32.0f));
+        break;
+      }
+
+      t = sFade(t,1.0f,0.0f);
+
+      mat0.Fade(t, matStart, matEnd);
+
+      matInvT = mat0;
+      matInvT.Invert3();
+      matInvT.Trans3();
+
+      mv->Transform(mat0, matInvT);
+    }
+  }
+
   Flush();
 }
 
@@ -6281,8 +6665,8 @@ static sInt ClassifyVertex(const Wz4MeshVertex &v,const sVector4 &plane)
 sInt Wz4Mesh::SplitEdgeAlongPlane(sInt va,sInt vb,const sVector4 &plane)
 {
   // TODO: hash table so vertices aren't generated multiple times
-  const Wz4MeshVertex &a = Vertices[va];
-  const Wz4MeshVertex &b = Vertices[vb];
+  const Wz4MeshVertex a = Vertices[va];
+  const Wz4MeshVertex b = Vertices[vb];
 
   sF32 da = a.Pos ^ plane;
   sF32 db = b.Pos ^ plane;
@@ -6325,6 +6709,7 @@ void Wz4Mesh::SplitGenFace(sInt base,const sInt *verts,sInt count,sBool reuseBas
     out->Cluster = Faces[base].Cluster;
     out->Count  = count;
     out->Select = Faces[base].Select;
+    out->Selected = Faces[base].Selected;
     for(sInt i=0;i<count;i++)
       out->Vertex[i] = verts[i];
   }
@@ -6333,6 +6718,7 @@ void Wz4Mesh::SplitGenFace(sInt base,const sInt *verts,sInt count,sBool reuseBas
     out->Cluster = Faces[base].Cluster;
     out->Count = 4;
     out->Select = Faces[base].Select;
+    out->Selected = Faces[base].Selected;
     for(sInt i=0;i<4;i++)
       out->Vertex[i] = verts[i];
 
@@ -6340,6 +6726,7 @@ void Wz4Mesh::SplitGenFace(sInt base,const sInt *verts,sInt count,sBool reuseBas
     out->Cluster = Faces[base].Cluster;
     out->Count = 3;
     out->Select = Faces[base].Select;
+    out->Selected = Faces[base].Selected;
     out->Vertex[0] = verts[0];
     out->Vertex[1] = verts[count-2];
     out->Vertex[2] = verts[count-1];
